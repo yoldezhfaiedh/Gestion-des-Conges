@@ -1,0 +1,53 @@
+image: docker:20.10.17
+
+services:
+  - docker:20.10.17-dind
+
+variables:
+  DOCKER_TLS_CERTDIR: "/certs"
+
+stages:
+  - build
+  - deploy
+
+build_image_dev:
+  stage: build
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    # Pull 'dev-latest' if it exists, ignoring errors
+    - docker pull $CI_REGISTRY_IMAGE:dev-latest || true
+    # Tag 'dev-latest' as 'dev-previous', ignoring errors
+    - docker tag $CI_REGISTRY_IMAGE:dev-latest $CI_REGISTRY_IMAGE:dev-previous || true
+    - docker push $CI_REGISTRY_IMAGE:dev-previous || true
+    # Build the Docker image
+    - docker build -t $CI_REGISTRY_IMAGE:dev-latest .
+    # Push the Docker image to the registry
+    - docker push $CI_REGISTRY_IMAGE:dev-latest
+
+  rules:
+    - if: $CI_COMMIT_REF_NAME == "dev" 
+    - changes:
+        - Dockerfile
+  
+deployment_dev:
+  stage: deploy
+  before_script:
+    - 'which ssh-agent || ( apt-get update -y && apt-get install openssh-client -y )'
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - chmod 700 ~/.ssh/id_rsa
+    - eval "$(ssh-agent -s)"
+    - ssh-add ~/.ssh/id_rsa
+    - ssh-keyscan -t rsa node12048-gestion-des-conges.uk.oxa.cloud > ~/.ssh/known_hosts
+    - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+    - chmod 644 ~/.ssh/known_hosts
+
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY  # Log in to the GitLab registry
+    - ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa root@node12048-gestion-des-conges.uk.oxa.cloud
+    - ssh -o StrictHostKeyChecking=no root@node12048-gestion-des-conges.uk.oxa.cloud "docker stop gestion_des_conges_front && docker rm -f gestion_des_conges_front || true"
+    - ssh -o StrictHostKeyChecking=no root@node12048-gestion-des-conges.uk.oxa.cloud "docker pull $CI_REGISTRY_IMAGE:dev-latest"
+    - ssh -o StrictHostKeyChecking=no root@node12048-gestion-des-conges.uk.oxa.cloud "docker run -d --name gestion_des_conges_front -p 3000:3000 -v /uploads:/app/public/uploads $CI_REGISTRY_IMAGE:dev-latest"
+  rules:
+    - if: $CI_COMMIT_REF_NAME == "dev" 
+

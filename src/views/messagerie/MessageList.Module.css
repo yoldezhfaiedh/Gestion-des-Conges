@@ -1,0 +1,29 @@
+.message-container {
+  margin-bottom: 10px;
+}
+
+.message-container.right {
+  text-align: right;
+}
+
+.message-container.left {
+  text-align: left;
+}
+
+.message {
+  background-color: #f2f2f2;
+  padding: 10px;
+  border-radius: 10px;
+  max-width: 70%;
+  word-wrap: break-word;
+  margin-bottom: 5px;
+}
+
+.right .message {
+  background-color: #0099ff; /* Couleur différente pour les messages de l'utilisateur connecté */
+  color: white;
+}
+
+.left .message {
+  background-color: #e6e6e6;
+}
