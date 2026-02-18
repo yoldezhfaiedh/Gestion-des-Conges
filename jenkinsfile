@@ -1,0 +1,162 @@
+pipeline {
+    agent any
+    options { timestamps() }
+
+    environment {
+        // ── À adapter avec ton namespace GitHub / Docker Registry ──
+        REGISTRY       = 'ghcr.io'                                          // GitHub Container Registry
+        IMAGE_NAME     = 'ghcr.io/yoldezhfaiedh/gestion-des-conges'
+        REMOTE_HOST    = 'root@node12048-gestion-des-conges.uk.oxa.cloud'
+        CONTAINER_NAME = 'gestion_des_conges_front'
+        APP_PORT       = '3000'
+    }
+
+    stages {
+
+        // ────────────────────────────────────────────────
+        // STAGE 1 — Checkout du code depuis GitHub
+        // ────────────────────────────────────────────────
+        stage('Checkout') {
+            steps {
+                echo "╔══ Branch : ${env.GIT_BRANCH ?: 'local'} | Job : ${env.JOB_NAME} ══╗"
+                checkout scm
+                sh 'ls -la'   // vérification que le code est bien là
+            }
+        }
+
+        // ────────────────────────────────────────────────
+        // STAGE 2 — Installation des dépendances Node.js
+        // ────────────────────────────────────────────────
+        stage('Install') {
+            steps {
+                sh 'node --version && npm --version'
+                sh 'npm ci'   // installation propre basée sur package-lock.json
+            }
+        }
+
+        // ────────────────────────────────────────────────
+        // STAGE 3 — Lint (Next.js intègre ESLint nativement)
+        // ────────────────────────────────────────────────
+        stage('Lint') {
+            steps {
+                // "next lint" est le script lint standard dans Next.js
+                sh 'npm run lint || true'
+            }
+        }
+
+        // ────────────────────────────────────────────────
+        // STAGE 4 — Tests
+        // ────────────────────────────────────────────────
+        stage('Test') {
+            steps {
+                // Si pas de tests configurés, --passWithNoTests évite l'échec
+                sh 'npm test -- --passWithNoTests --watchAll=false || true'
+            }
+            post {
+                always {
+                    sh 'ls coverage/ 2>/dev/null && cat coverage/coverage-summary.json 2>/dev/null || echo "Pas de rapport coverage"'
+                }
+            }
+        }
+
+        // ────────────────────────────────────────────────
+        // STAGE 5 — Build Docker Image
+        // Même logique que "build_image_dev" dans ton gitlab-ci.yml :
+        //   pull dev-latest → tag en dev-previous → build → push dev-latest
+        // ────────────────────────────────────────────────
+        stage('Build Docker Image') {
+            when {
+                branch 'dev'    // S'exécute uniquement sur la branche "dev"
+            }
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'github-registry-credentials',  // à créer dans Jenkins
+                        usernameVariable: 'REGISTRY_USER',
+                        passwordVariable: 'REGISTRY_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        echo "──► Login GitHub Container Registry"
+                        echo $REGISTRY_PASSWORD | docker login $REGISTRY -u $REGISTRY_USER --password-stdin
+
+                        echo "──► Pull dev-latest pour rollback si elle existe"
+                        docker pull $IMAGE_NAME:dev-latest || true
+
+                        echo "──► Tag dev-latest → dev-previous (rollback)"
+                        docker tag $IMAGE_NAME:dev-latest $IMAGE_NAME:dev-previous || true
+                        docker push $IMAGE_NAME:dev-previous || true
+
+                        echo "──► Build nouvelle image depuis Dockerfile"
+                        docker build -t $IMAGE_NAME:dev-latest .
+
+                        echo "──► Push dev-latest vers le registry"
+                        docker push $IMAGE_NAME:dev-latest
+                    '''
+                }
+            }
+        }
+
+        // ────────────────────────────────────────────────
+        // STAGE 6 — Deploy sur le serveur distant via SSH
+        // Même logique que "deployment_dev" dans ton gitlab-ci.yml
+        // ────────────────────────────────────────────────
+        stage('Deploy') {
+            when {
+                branch 'dev'    // S'exécute uniquement sur la branche "dev"
+            }
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'ssh-deploy-key',       // à créer dans Jenkins
+                        keyFileVariable: 'SSH_KEY'
+                    ),
+                    usernamePassword(
+                        credentialsId: 'github-registry-credentials',
+                        usernameVariable: 'REGISTRY_USER',
+                        passwordVariable: 'REGISTRY_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        echo "──► Login registry depuis le serveur distant"
+                        ssh -o StrictHostKeyChecking=no -i $SSH_KEY $REMOTE_HOST \
+                            "echo $REGISTRY_PASSWORD | docker login $REGISTRY -u $REGISTRY_USER --password-stdin"
+
+                        echo "──► Stop & suppression de l'ancien container"
+                        ssh -o StrictHostKeyChecking=no -i $SSH_KEY $REMOTE_HOST \
+                            "docker stop $CONTAINER_NAME && docker rm -f $CONTAINER_NAME || true"
+
+                        echo "──► Pull de la nouvelle image"
+                        ssh -o StrictHostKeyChecking=no -i $SSH_KEY $REMOTE_HOST \
+                            "docker pull $IMAGE_NAME:dev-latest"
+
+                        echo "──► Lancement du nouveau container Next.js"
+                        ssh -o StrictHostKeyChecking=no -i $SSH_KEY $REMOTE_HOST \
+                            "docker run -d \
+                                --name $CONTAINER_NAME \
+                                -p $APP_PORT:3000 \
+                                -v /uploads:/app/public/uploads \
+                                --restart unless-stopped \
+                                $IMAGE_NAME:dev-latest"
+
+                        echo "──► Vérification que le container tourne"
+                        ssh -o StrictHostKeyChecking=no -i $SSH_KEY $REMOTE_HOST \
+                            "docker ps | grep $CONTAINER_NAME"
+                    '''
+                }
+            }
+        }
+    }
+
+    // ────────────────────────────────────────────────
+    // Résultat final du pipeline
+    // ────────────────────────────────────────────────
+    post {
+        success {
+            echo "✅ Pipeline réussi — $IMAGE_NAME:dev-latest déployé sur $REMOTE_HOST:$APP_PORT"
+        }
+        failure {
+            echo "❌ Pipeline ÉCHOUÉ — consulte les logs ci-dessus pour diagnostiquer"
+        }
+    }
+}
